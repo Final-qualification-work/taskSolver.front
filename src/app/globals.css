@@ -1,0 +1,89 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f6f7fb;
+  --foreground: #2f3142;
+  --surface: #ffffff;
+  --accent-primary: #b8d8ff;
+  --accent-secondary: #74b6f5;
+  --accent-danger: #77abf3;
+  --warm-neutral: #5d5f78;
+  --warm-muted: #7f8199;
+  --border-soft: #e8eaf3;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-accent-primary: var(--accent-primary);
+  --color-accent-secondary: var(--accent-secondary);
+  --color-accent-danger: var(--accent-danger);
+  --color-warm-neutral: var(--warm-neutral);
+  --color-warm-muted: var(--warm-muted);
+  --color-border-soft: var(--border-soft);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+* {
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease,
+    transform 180ms ease, box-shadow 180ms ease;
+}
+
+@keyframes soft-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes soft-pop {
+  0% {
+    transform: scale(0.98);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+main > * {
+  animation: soft-fade-up 320ms ease both;
+}
+
+button,
+a,
+input,
+textarea,
+select,
+[role="tab"],
+[role="button"],
+[draggable="true"] {
+  animation: soft-pop 220ms ease both;
+}
+
+button:hover,
+a:hover,
+[role="tab"]:hover,
+[role="button"]:hover,
+[draggable="true"]:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(39, 44, 71, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
