@@ -1,10 +1,15 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { BarChart3, KanbanSquare, LayoutDashboard, Sparkles, Users } from "lucide-react";
+import { BarChart3, FolderKanban, KanbanSquare, LayoutDashboard, Sparkles, Users } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { api, TaskFilters } from "@/lib/api";
 import {
+  DashboardAnalytics,
+  DistributionChartData,
+  LoadChartData,
+  OptimizationSolution,
+  Project,
   TagType,
   TaskItem,
   TaskStats,
@@ -14,6 +19,9 @@ import {
   TeamTasksData,
   UserProfile,
 } from "@/lib/types";
+import { AnalyticsPanel } from "@/components/analytics-panel";
+import { PreferencesPanel } from "@/components/preferences-panel";
+import { ProjectsPanel } from "@/components/projects-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,7 +55,7 @@ import { cn } from "@/lib/utils";
 import { clearAuthToken } from "@/lib/auth";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
-const tabs = ["Обзор", "Задачи", "Команды", "Оптимизация"] as const;
+const tabs = ["Обзор", "Проекты", "Задачи", "Команды", "Оптимизация"] as const;
 const tagOptions: TagType[] = ["frontend", "backend", "ML"];
 const statusOptions: TaskStatus[] = [
   "not groomed",
@@ -72,23 +80,19 @@ const sortFields = [
 ] as const;
 const tabIcons: Record<(typeof tabs)[number], React.ReactNode> = {
   Обзор: <LayoutDashboard className="h-4 w-4" />,
+  Проекты: <FolderKanban className="h-4 w-4" />,
   Задачи: <KanbanSquare className="h-4 w-4" />,
   Команды: <Users className="h-4 w-4" />,
   Оптимизация: <Sparkles className="h-4 w-4" />,
 };
 
-// ─── Types ───────────────────────────────────────────────────────────────────
 type OptimizeViewData = {
   summary?: {
     solutionsCount?: number;
+    totalTeams?: number;
+    totalTasks?: number;
   };
-  paretoFront?: Array<{
-    point: string;
-    name: string;
-    metrics: { totalCost: string; maxLoad: string };
-    assignments?: Array<{ taskName: string; teamName: string; complexity: number; cost: number }>;
-    teamLoads?: Array<{ teamName: string; load: number; capacity: number; percentage: string }>;
-  }>;
+  paretoFront?: OptimizationSolution[];
 };
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -101,6 +105,12 @@ export default function TeamBalancerApp() {
   const [taskStats, setTaskStats] = useState<TaskStats | null>(null);
   const [totalPages, setTotalPages] = useState(1);
   const [optimizationData, setOptimizationData] = useState<OptimizeViewData | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [taskProjectFilter, setTaskProjectFilter] = useState<string>("__all__");
+  const [createTaskProjectId, setCreateTaskProjectId] = useState<string>("");
+  const [dashboardAnalytics, setDashboardAnalytics] = useState<DashboardAnalytics | null>(null);
+  const [loadChart, setLoadChart] = useState<LoadChartData | null>(null);
+  const [taskDistribution, setTaskDistribution] = useState<DistributionChartData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -165,20 +175,25 @@ export default function TeamBalancerApp() {
       setIsLoading(true);
       setError("");
       try {
-        const [teamsResult, tasksResult, statsResult, loadResult] = await Promise.all([
+        const [teamsResult, tasksResult, statsResult, loadResult, projectsResult] = await Promise.all([
           api.getTeams({ search: teamSearch || undefined, tag: teamTagFilter || undefined }),
           api.getTasks(taskFilters),
           api.getTaskStats(),
           api.getTeamLoad(),
+          api.getProjects().catch(() => ({ data: [] as Project[] })),
         ]);
         const meResult = await api.getMe().catch(() => null);
         if (cancelled) return;
         setTeams(teamsResult.data || []);
         setTasks(tasksResult.data || []);
+        setProjects(projectsResult.data || []);
         setTotalPages(tasksResult.totalPages ?? 1);
         setTaskStats(statsResult.data || null);
         setTeamLoadData(loadResult.data || []);
         setCurrentUser(meResult?.data ?? null);
+        if (!createTaskProjectId && projectsResult.data?.length) {
+          setCreateTaskProjectId(String(projectsResult.data[0].id));
+        }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Не удалось загрузить данные");
       } finally {
@@ -192,11 +207,48 @@ export default function TeamBalancerApp() {
     };
   }, [taskFilters, teamSearch, teamTagFilter, fetchTick]);
 
+  useEffect(() => {
+    if (activeTab !== "Обзор") return;
+    let cancelled = false;
+
+    async function loadAnalytics() {
+      try {
+        const projectId =
+          taskProjectFilter !== "__all__" ? Number(taskProjectFilter) : undefined;
+        const [dash, load, dist] = await Promise.all([
+          api.getDashboardAnalytics(),
+          api.getLoadChart(),
+          api.getTaskDistribution(projectId),
+        ]);
+        if (cancelled) return;
+        setDashboardAnalytics(dash.data);
+        setLoadChart(load.data);
+        setTaskDistribution(dist.data);
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Не удалось загрузить аналитику");
+        }
+      }
+    }
+
+    loadAnalytics();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, taskProjectFilter, fetchTick]);
+
   // ─── Task actions ──────────────────────────────────────────────────────────
   async function createTask(e: FormEvent) {
     e.preventDefault();
+    if (!createTaskProjectId) {
+      setError("Выберите проект — задачи создаются внутри проекта");
+      return;
+    }
     try {
-      await api.createTask(taskForm);
+      await api.addTaskToProject(Number(createTaskProjectId), {
+        ...taskForm,
+        deadline: taskForm.deadline || new Date().toISOString(),
+      });
       setTaskForm({
         name: "",
         description: "",
@@ -436,7 +488,7 @@ export default function TeamBalancerApp() {
     setError("");
     try {
       const result = await api.optimize();
-      setOptimizationData((result.data as OptimizeViewData) || null);
+      setOptimizationData(result.data || null);
       setActiveTab("Оптимизация");
       setSelectedOptimizationPoint("");
     } catch (e) {
@@ -462,11 +514,17 @@ export default function TeamBalancerApp() {
 
   // ─── Derived data ──────────────────────────────────────────────────────────
   // Client-side sort — ensures order is always visible regardless of backend
+  const projectFilteredTasks = useMemo(() => {
+    if (taskProjectFilter === "__all__") return tasks;
+    const pid = Number(taskProjectFilter);
+    return tasks.filter((t) => t.projectId === pid);
+  }, [tasks, taskProjectFilter]);
+
   const sortedTasks = (() => {
     const key = taskFilters.sort_by;
     const order = taskFilters.sort_order === "ASC" ? 1 : -1;
-    if (!key) return tasks;
-    return [...tasks].sort((a, b) => {
+    if (!key) return projectFilteredTasks;
+    return [...projectFilteredTasks].sort((a, b) => {
       const aVal = a[key as keyof TaskItem];
       const bVal = b[key as keyof TaskItem];
       if (aVal == null) return 1;
@@ -565,6 +623,17 @@ export default function TeamBalancerApp() {
         ══════════════════════════════════════════════════════ */}
         {activeTab === "Обзор" && (
           <section className="space-y-4">
+            <AnalyticsPanel
+              dashboard={dashboardAnalytics}
+              loadChart={loadChart}
+              distribution={taskDistribution}
+              projectFilterLabel={
+                taskProjectFilter !== "__all__"
+                  ? projects.find((p) => String(p.id) === taskProjectFilter)?.name
+                  : undefined
+              }
+            />
+
             {/* KPI cards */}
             <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
               {[
@@ -699,6 +768,14 @@ export default function TeamBalancerApp() {
           </section>
         )}
 
+        {activeTab === "Проекты" && (
+          <ProjectsPanel
+            onError={setError}
+            onTasksChanged={reloadData}
+            statusLabels={statusLabels}
+          />
+        )}
+
         {/* ══════════════════════════════════════════════════════
             TAB: ЗАДАЧИ
         ══════════════════════════════════════════════════════ */}
@@ -706,6 +783,26 @@ export default function TeamBalancerApp() {
           <section className="space-y-3">
             {/* ── Single compact toolbar ── */}
             <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border-soft bg-surface px-4 py-3">
+              <Select
+                value={taskProjectFilter}
+                onValueChange={(v) => {
+                  setTaskProjectFilter(v);
+                  if (v !== "__all__") setCreateTaskProjectId(v);
+                }}
+              >
+                <SelectTrigger className="h-8 w-44 text-xs">
+                  <SelectValue placeholder="Проект" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">Все проекты</SelectItem>
+                  {projects.map((p) => (
+                    <SelectItem key={p.id} value={String(p.id)}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
               {/* Tag */}
               <Select
                 value={taskFilters.tag ?? "__all__"}
@@ -1195,6 +1292,8 @@ export default function TeamBalancerApp() {
         ══════════════════════════════════════════════════════ */}
         {activeTab === "Оптимизация" && (
           <section className="space-y-4">
+            <PreferencesPanel teams={teams} onError={setError} />
+
             {!optimizationData ? (
               <Card>
                 <CardContent className="flex flex-col items-center gap-4 py-10 text-center">
@@ -1227,7 +1326,13 @@ export default function TeamBalancerApp() {
                           {item.point}. {item.name}
                         </CardTitle>
                         <CardDescription>
-                          Стоимость: {item.metrics.totalCost} · Max load: {item.metrics.maxLoad}%
+                          Стоимость: {item.metrics.totalCost} · Загрузка: {item.metrics.maxLoad}%
+                          {item.metrics.totalPreference != null
+                            ? ` · Предпочтение: ${item.metrics.totalPreference}`
+                            : ""}
+                          {item.weights
+                            ? ` · α=${item.weights.alpha} β=${item.weights.beta} γ=${item.weights.gamma}`
+                            : ""}
                         </CardDescription>
                         <div className="pt-2">
                           <Button
@@ -1292,7 +1397,7 @@ export default function TeamBalancerApp() {
               key={tab}
               onClick={() => setActiveTab(tab)}
               className={cn(
-                "flex min-w-[74px] flex-1 flex-col items-center rounded-xl px-2 py-2 text-xs",
+                "flex min-w-[56px] flex-1 flex-col items-center rounded-xl px-1 py-2 text-[10px] sm:text-xs",
                 activeTab === tab ? "bg-accent-primary/30 font-semibold" : "text-warm-muted",
               )}
             >
@@ -1458,10 +1563,27 @@ export default function TeamBalancerApp() {
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Новая задача</DialogTitle>
-            <DialogDescription>Заполните поля и нажмите «Создать»</DialogDescription>
+            <DialogDescription>
+              Задача создаётся в проекте (POST /projects/:id/tasks)
+            </DialogDescription>
           </DialogHeader>
           <form onSubmit={createTask}>
             <div className="grid gap-3 md:grid-cols-2">
+              <label className="text-sm text-warm-muted md:col-span-2">
+                Проект
+                <Select value={createTaskProjectId} onValueChange={setCreateTaskProjectId}>
+                  <SelectTrigger className="mt-1">
+                    <SelectValue placeholder="Выберите проект" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {projects.map((p) => (
+                      <SelectItem key={p.id} value={String(p.id)}>
+                        {p.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
               <label className="text-sm text-warm-muted md:col-span-2">
                 Название
                 <Input
@@ -1678,8 +1800,8 @@ export default function TeamBalancerApp() {
                 ) : selectedTeamTasks ? (
                   <>
                     <p className="mt-2 text-xs text-warm-muted">
-                      Всего: {selectedTeamTasks.stats.total} · Ср. приоритет:{" "}
-                      {selectedTeamTasks.stats.avgPriority}
+                      Всего: {selectedTeamTasks.stats?.total ?? selectedTeamTasks.tasks.length} · Ср.
+                      приоритет: {selectedTeamTasks.stats?.avgPriority ?? "—"}
                     </p>
                     <div className="mt-2 space-y-1">
                       {selectedTeamTasks.tasks.slice(0, 5).map((task) => (

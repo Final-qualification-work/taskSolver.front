@@ -1,4 +1,18 @@
-import { ApiResponse, TaskItem, TaskStats, Team, TeamLoad, TeamTasksData, UserProfile } from "@/lib/types";
+import {
+  ApiResponse,
+  DashboardAnalytics,
+  DistributionChartData,
+  LoadChartData,
+  PersonalizedRecommendation,
+  Project,
+  TaskItem,
+  TaskStats,
+  Team,
+  TeamLoad,
+  TeamTasksData,
+  UserPreferences,
+  UserProfile,
+} from "@/lib/types";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "/api";
@@ -40,6 +54,7 @@ export type TaskFilters = {
   sort_order?: "ASC" | "DESC";
   page?: number;
   limit?: number;
+  projectId?: number;
 };
 
 export type TeamFilters = {
@@ -57,6 +72,15 @@ export type TasksListResponse = ApiResponse<TaskItem[]> & {
 export type AuthResponse = ApiResponse<UserProfile> & {
   token: string;
 };
+
+export type OptimizeResponse = ApiResponse<{
+  summary: {
+    totalTeams: number;
+    totalTasks: number;
+    solutionsCount: number;
+  };
+  paretoFront: import("@/lib/types").OptimizationSolution[];
+}>;
 
 function buildQuery(params: Record<string, string | number | undefined>): string {
   const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
@@ -93,6 +117,38 @@ export const api = {
   deleteTeam: (id: number) =>
     request<ApiResponse<null>>(`/teams/${id}`, { method: "DELETE" }),
 
+  // ── Projects ───────────────────────────────────────────────────────────────
+  getProjects: () => request<ApiResponse<Project[]>>("/projects"),
+
+  getProjectById: (id: number) => request<ApiResponse<Project>>(`/projects/${id}`),
+
+  getProjectTasks: (id: number, filters?: { status?: string; priority?: number }) =>
+    request<ApiResponse<TeamTasksData>>(`/projects/${id}/tasks` + buildQuery({ ...filters })),
+
+  getProjectStatistics: (id: number) =>
+    request<ApiResponse<Record<string, unknown>>>(`/projects/${id}/statistics`),
+
+  createProject: (payload: Partial<Project>) =>
+    request<ApiResponse<Project>>("/projects", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateProject: (id: number, payload: Partial<Project>) =>
+    request<ApiResponse<Project>>(`/projects/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteProject: (id: number) =>
+    request<ApiResponse<null>>(`/projects/${id}`, { method: "DELETE" }),
+
+  addTaskToProject: (projectId: number, payload: Partial<TaskItem>) =>
+    request<ApiResponse<TaskItem>>(`/projects/${projectId}/tasks`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   // ── Tasks ──────────────────────────────────────────────────────────────────
   getTasks: (filters?: TaskFilters) =>
     request<TasksListResponse>(
@@ -127,12 +183,43 @@ export const api = {
     }),
 
   // ── Optimization ───────────────────────────────────────────────────────────
-  optimize: () => request<ApiResponse<unknown>>("/tasks/optimize"),
+  optimize: () => request<OptimizeResponse>("/tasks/optimize"),
+
   applyOptimization: (point: string) =>
     request<ApiResponse<{ point: string; name: string }>>("/tasks/optimize/apply", {
       method: "POST",
       body: JSON.stringify({ point }),
     }),
+
+  // ── Visualization ──────────────────────────────────────────────────────────
+  getLoadChart: () =>
+    request<ApiResponse<LoadChartData>>("/visualization/load-chart"),
+
+  getTaskDistribution: (projectId?: number) =>
+    request<ApiResponse<DistributionChartData>>(
+      "/visualization/task-distribution" + buildQuery({ projectId }),
+    ),
+
+  getDashboardAnalytics: () =>
+    request<ApiResponse<DashboardAnalytics>>("/visualization/dashboard"),
+
+  getParetoVisualization: () =>
+    request<ApiResponse<{ paretoFront: import("@/lib/types").ParetoVizPoint[]; chartConfig: Record<string, string> }>>(
+      "/visualization/pareto-front",
+    ),
+
+  // ── Preferences ────────────────────────────────────────────────────────────
+  getPreferences: () =>
+    request<ApiResponse<UserPreferences>>("/visualization/preferences"),
+
+  updatePreferences: (payload: Partial<UserPreferences>) =>
+    request<ApiResponse<UserPreferences>>("/visualization/preferences", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  getPersonalizedRecommendations: () =>
+    request<ApiResponse<PersonalizedRecommendation>>("/visualization/recommendations"),
 
   // ── Auth ───────────────────────────────────────────────────────────────────
   register: (payload: {
