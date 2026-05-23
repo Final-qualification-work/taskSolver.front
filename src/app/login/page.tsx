@@ -26,7 +26,6 @@ export default function LoginPage() {
         if (!cancelled) router.replace("/");
       })
       .catch(() => {
-        // ignore: token may be expired or invalid
       });
 
     return () => {

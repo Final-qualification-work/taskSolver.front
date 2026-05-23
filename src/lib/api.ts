@@ -10,6 +10,7 @@ import {
   Team,
   TeamLoad,
   TeamTasksData,
+  UserListItem,
   UserPreferences,
   UserProfile,
 } from "@/lib/types";
@@ -37,7 +38,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok || data.success === false) {
-    throw new Error(data.message || "Ошибка запроса");
+    const message =
+      typeof data?.message === "string"
+        ? data.message
+        : typeof data?.error === "string"
+          ? data.error
+          : "Ошибка запроса";
+    throw new Error(message);
   }
 
   return data as T;
@@ -55,6 +62,7 @@ export type TaskFilters = {
   page?: number;
   limit?: number;
   projectId?: number;
+  assignedTeamId?: number;
 };
 
 export type TeamFilters = {
@@ -89,7 +97,6 @@ function buildQuery(params: Record<string, string | number | undefined>): string
 }
 
 export const api = {
-  // ── Teams ──────────────────────────────────────────────────────────────────
   getTeams: (filters?: TeamFilters) =>
     request<ApiResponse<Team[]>>("/teams" + buildQuery({ ...filters })),
 
@@ -117,7 +124,6 @@ export const api = {
   deleteTeam: (id: number) =>
     request<ApiResponse<null>>(`/teams/${id}`, { method: "DELETE" }),
 
-  // ── Projects ───────────────────────────────────────────────────────────────
   getProjects: () => request<ApiResponse<Project[]>>("/projects"),
 
   getProjectById: (id: number) => request<ApiResponse<Project>>(`/projects/${id}`),
@@ -149,7 +155,6 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  // ── Tasks ──────────────────────────────────────────────────────────────────
   getTasks: (filters?: TaskFilters) =>
     request<TasksListResponse>(
       "/tasks" + buildQuery({ limit: 100, ...filters }),
@@ -182,7 +187,6 @@ export const api = {
       body: JSON.stringify({ updates }),
     }),
 
-  // ── Optimization ───────────────────────────────────────────────────────────
   optimize: () => request<OptimizeResponse>("/tasks/optimize"),
 
   applyOptimization: (point: string) =>
@@ -191,7 +195,60 @@ export const api = {
       body: JSON.stringify({ point }),
     }),
 
-  // ── Visualization ──────────────────────────────────────────────────────────
+  exportTasksCsv: async (filters?: { status?: string; tag?: string }) => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+    const query = buildQuery({ format: "csv", ...filters });
+    const response = await fetch(`${API_BASE_URL}/tasks/export${query}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      throw new Error(data?.message || "Не удалось экспортировать задачи");
+    }
+    const blob = await response.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `tasks_export_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+  },
+
+  getUsers: () => request<ApiResponse<UserListItem[]>>("/users"),
+
+  createUser: (payload: {
+    username: string;
+    email: string;
+    password: string;
+    role: string;
+    teamId?: number | null;
+    isActive?: boolean;
+  }) =>
+    request<ApiResponse<UserListItem>>("/users", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  updateUser: (
+    id: number,
+    payload: Partial<{
+      username: string;
+      email: string;
+      password: string;
+      role: string;
+      teamId: number | null;
+      isActive: boolean;
+    }>,
+  ) =>
+    request<ApiResponse<UserListItem>>(`/users/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteUser: (id: number) =>
+    request<ApiResponse<null>>(`/users/${id}`, { method: "DELETE" }),
+
   getLoadChart: () =>
     request<ApiResponse<LoadChartData>>("/visualization/load-chart"),
 
@@ -208,7 +265,6 @@ export const api = {
       "/visualization/pareto-front",
     ),
 
-  // ── Preferences ────────────────────────────────────────────────────────────
   getPreferences: () =>
     request<ApiResponse<UserPreferences>>("/visualization/preferences"),
 
@@ -221,7 +277,6 @@ export const api = {
   getPersonalizedRecommendations: () =>
     request<ApiResponse<PersonalizedRecommendation>>("/visualization/recommendations"),
 
-  // ── Auth ───────────────────────────────────────────────────────────────────
   register: (payload: {
     username: string;
     email: string;

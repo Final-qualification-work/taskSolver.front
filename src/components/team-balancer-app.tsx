@@ -1,7 +1,14 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { BarChart3, FolderKanban, KanbanSquare, LayoutDashboard, Sparkles, Users } from "lucide-react";
+import {
+  FolderKanban,
+  KanbanSquare,
+  LayoutDashboard,
+  Shield,
+  Sparkles,
+  Users,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { api, TaskFilters } from "@/lib/api";
 import {
@@ -20,8 +27,8 @@ import {
   UserProfile,
 } from "@/lib/types";
 import { AnalyticsPanel } from "@/components/analytics-panel";
-import { PreferencesPanel } from "@/components/preferences-panel";
 import { ProjectsPanel } from "@/components/projects-panel";
+import { UsersAdminPanel } from "@/components/users-admin-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -53,9 +60,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { clearAuthToken } from "@/lib/auth";
+import { getCapabilities, ROLE_DESCRIPTIONS, ROLE_LABELS } from "@/lib/permissions";
 
-// ─── Constants ──────────────────────────────────────────────────────────────
-const tabs = ["Обзор", "Проекты", "Задачи", "Команды", "Оптимизация"] as const;
+type AppTab = "Обзор" | "Проекты" | "Задачи" | "Команды" | "Оптимизация" | "Админ";
 const tagOptions: TagType[] = ["frontend", "backend", "ML"];
 const statusOptions: TaskStatus[] = [
   "not groomed",
@@ -78,12 +85,13 @@ const sortFields = [
   { value: "name", label: "Название" },
   { value: "createdAt", label: "Дата создания" },
 ] as const;
-const tabIcons: Record<(typeof tabs)[number], React.ReactNode> = {
+const tabIcons: Record<AppTab, React.ReactNode> = {
   Обзор: <LayoutDashboard className="h-4 w-4" />,
   Проекты: <FolderKanban className="h-4 w-4" />,
   Задачи: <KanbanSquare className="h-4 w-4" />,
   Команды: <Users className="h-4 w-4" />,
   Оптимизация: <Sparkles className="h-4 w-4" />,
+  Админ: <Shield className="h-4 w-4" />,
 };
 
 type OptimizeViewData = {
@@ -95,10 +103,47 @@ type OptimizeViewData = {
   paretoFront?: OptimizationSolution[];
 };
 
-// ─── Component ───────────────────────────────────────────────────────────────
+const OPTIMIZATION_POINT_ORDER = ["A", "C", "D", "F"] as const;
+const OPTIMIZATION_VARIANT_NAMES = new Set([
+  "Минимизация стоимости",
+  "Равный баланс",
+  "Акцент на разгрузке",
+  "Максимум приоритета",
+  "Максимум предпочтительности",
+]);
+const POINT_BY_VARIANT_NAME: Record<string, (typeof OPTIMIZATION_POINT_ORDER)[number]> = {
+  "Минимизация стоимости": "A",
+  "Равный баланс": "C",
+  "Акцент на разгрузке": "D",
+  "Максимум приоритета": "F",
+  "Максимум предпочтительности": "F",
+};
+
+function filterOptimizationVariants(items: OptimizationSolution[] | undefined) {
+  if (!items?.length) return [];
+  return [...items]
+    .filter(
+      (item) =>
+        OPTIMIZATION_VARIANT_NAMES.has(item.name) ||
+        OPTIMIZATION_POINT_ORDER.includes(item.point as (typeof OPTIMIZATION_POINT_ORDER)[number]),
+    )
+    .map((item) => ({
+      ...item,
+      point:
+        OPTIMIZATION_POINT_ORDER.includes(item.point as (typeof OPTIMIZATION_POINT_ORDER)[number])
+          ? item.point
+          : (POINT_BY_VARIANT_NAME[item.name] ?? item.point),
+    }))
+    .sort(
+      (a, b) =>
+        OPTIMIZATION_POINT_ORDER.indexOf(a.point as (typeof OPTIMIZATION_POINT_ORDER)[number]) -
+        OPTIMIZATION_POINT_ORDER.indexOf(b.point as (typeof OPTIMIZATION_POINT_ORDER)[number]),
+    );
+}
+
 export default function TeamBalancerApp() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<(typeof tabs)[number]>("Обзор");
+  const [activeTab, setActiveTab] = useState<AppTab>("Обзор");
   const [teams, setTeams] = useState<Team[]>([]);
   const [teamLoadData, setTeamLoadData] = useState<TeamLoad[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
@@ -116,7 +161,32 @@ export default function TeamBalancerApp() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [selectedOptimizationPoint, setSelectedOptimizationPoint] = useState<string>("");
 
-  // Task view / filters
+  const caps = useMemo(() => getCapabilities(currentUser), [currentUser]);
+  const readOnly = !caps.canEditTasks;
+  const userCanOptimize = caps.canOptimize;
+  const visibleTabs = useMemo((): AppTab[] => {
+    const base: AppTab[] = ["Обзор", "Проекты", "Задачи", "Команды"];
+    const result = [...base];
+    if (userCanOptimize) result.push("Оптимизация");
+    if (caps.canManageUsers) result.push("Админ");
+    return result;
+  }, [userCanOptimize, caps.canManageUsers]);
+
+  const displayedTab: AppTab =
+    activeTab === "Оптимизация" && !userCanOptimize
+      ? "Обзор"
+      : activeTab === "Админ" && !caps.canManageUsers
+        ? "Обзор"
+        : activeTab;
+
+  function selectTab(tab: AppTab) {
+    if (tab === "Оптимизация" && !userCanOptimize) return;
+    if (tab === "Админ" && !caps.canManageUsers) return;
+    setActiveTab(tab);
+  }
+
+  const [myTasksOnly, setMyTasksOnly] = useState(false);
+
   const [taskView, setTaskView] = useState<"kanban" | "table">("kanban");
   const [taskFilters, setTaskFilters] = useState<TaskFilters>({
     sort_by: "business_priority",
@@ -130,17 +200,14 @@ export default function TeamBalancerApp() {
   const [bulkAssignedTeamId, setBulkAssignedTeamId] = useState<string>("__keep__");
   const [bulkPriority, setBulkPriority] = useState<string>("");
 
-  // Team filters / search
   const [teamSearch, setTeamSearch] = useState("");
   const [teamTagFilter, setTeamTagFilter] = useState("");
 
-  // Refetch trigger
   const [fetchTick, setFetchTick] = useState(0);
   function reloadData() {
     setFetchTick((t) => t + 1);
   }
 
-  // Modals
   const [selectedTask, setSelectedTask] = useState<TaskItem | null>(null);
   const [taskDraft, setTaskDraft] = useState<Partial<TaskItem> | null>(null);
   const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);
@@ -150,15 +217,15 @@ export default function TeamBalancerApp() {
   const [showAddTask, setShowAddTask] = useState(false);
   const [showAddTeam, setShowAddTeam] = useState(false);
 
-  // Forms
   const [taskForm, setTaskForm] = useState({
     name: "",
     description: "",
     tag: "frontend" as TagType,
     complexity: 5,
     deadline: "",
-    business_priority: 5,
+    business_priority: 2,
     status: "backlog" as TaskStatus,
+    assignedTeamId: null as number | null,
   });
   const [teamForm, setTeamForm] = useState({
     name: "",
@@ -167,7 +234,6 @@ export default function TeamBalancerApp() {
     capacity: 40,
   });
 
-  // ─── Data loading ──────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
@@ -180,7 +246,7 @@ export default function TeamBalancerApp() {
           api.getTasks(taskFilters),
           api.getTaskStats(),
           api.getTeamLoad(),
-          api.getProjects().catch(() => ({ data: [] as Project[] })),
+          api.getProjects(),
         ]);
         const meResult = await api.getMe().catch(() => null);
         if (cancelled) return;
@@ -208,7 +274,7 @@ export default function TeamBalancerApp() {
   }, [taskFilters, teamSearch, teamTagFilter, fetchTick]);
 
   useEffect(() => {
-    if (activeTab !== "Обзор") return;
+    if (displayedTab !== "Обзор") return;
     let cancelled = false;
 
     async function loadAnalytics() {
@@ -235,11 +301,11 @@ export default function TeamBalancerApp() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, taskProjectFilter, fetchTick]);
+  }, [displayedTab, taskProjectFilter, fetchTick]);
 
-  // ─── Task actions ──────────────────────────────────────────────────────────
   async function createTask(e: FormEvent) {
     e.preventDefault();
+    if (readOnly || !caps.canCreateTasks) return;
     if (!createTaskProjectId) {
       setError("Выберите проект — задачи создаются внутри проекта");
       return;
@@ -248,6 +314,7 @@ export default function TeamBalancerApp() {
       await api.addTaskToProject(Number(createTaskProjectId), {
         ...taskForm,
         deadline: taskForm.deadline || new Date().toISOString(),
+        assignedTeamId: taskForm.assignedTeamId ?? undefined,
       });
       setTaskForm({
         name: "",
@@ -255,8 +322,9 @@ export default function TeamBalancerApp() {
         tag: "frontend",
         complexity: 5,
         deadline: "",
-        business_priority: 5,
+        business_priority: 2,
         status: "backlog",
+        assignedTeamId: null,
       });
       setShowAddTask(false);
       reloadData();
@@ -266,6 +334,7 @@ export default function TeamBalancerApp() {
   }
 
   async function updateTaskStatus(taskId: number, status: TaskStatus) {
+    if (readOnly) return;
     try {
       await api.updateTask(taskId, { status });
       reloadData();
@@ -290,6 +359,7 @@ export default function TeamBalancerApp() {
   }
 
   async function applyBulkUpdate() {
+    if (readOnly) return;
     const visibleIds = new Set(sortedTasks.map((task) => task.id));
     const targetTaskIds = selectedTaskIds.filter((id) => visibleIds.has(id));
     if (!targetTaskIds.length) {
@@ -331,6 +401,7 @@ export default function TeamBalancerApp() {
   }
 
   async function deleteTask(taskId: number) {
+    if (readOnly) return;
     try {
       await api.deleteTask(taskId);
       setSelectedTask(null);
@@ -343,7 +414,7 @@ export default function TeamBalancerApp() {
 
   async function saveTaskDraft(e: FormEvent) {
     e.preventDefault();
-    if (!selectedTask || !taskDraft) return;
+    if (readOnly || !selectedTask || !taskDraft) return;
     try {
       await api.updateTask(selectedTask.id, taskDraft);
       setSelectedTask(null);
@@ -368,9 +439,9 @@ export default function TeamBalancerApp() {
     });
   }
 
-  // ─── Team actions ──────────────────────────────────────────────────────────
   async function createTeam(e: FormEvent) {
     e.preventDefault();
+    if (!caps.canManageTeams) return;
     try {
       await api.createTeam(teamForm);
       setTeamForm({ name: "", tag: "frontend", cost: 2000, capacity: 40 });
@@ -382,6 +453,7 @@ export default function TeamBalancerApp() {
   }
 
   async function deleteTeam(teamId: number) {
+    if (!caps.canManageTeams) return;
     try {
       await api.deleteTeam(teamId);
       reloadData();
@@ -392,6 +464,7 @@ export default function TeamBalancerApp() {
 
   async function saveTeamDraft(e: FormEvent) {
     e.preventDefault();
+    if (!caps.canManageTeams) return;
     if (!selectedTeam || !teamDraft) return;
     try {
       await api.updateTeam(selectedTeam.id, teamDraft);
@@ -426,70 +499,32 @@ export default function TeamBalancerApp() {
       });
   }
 
-  function toCsvValue(value: unknown): string {
-    const text = String(value ?? "");
-    const escaped = text.replace(/"/g, '""');
-    return `"${escaped}"`;
-  }
-
   async function exportTasksCsv() {
+    if (!caps.canViewReports) {
+      setError("Недостаточно прав для экспорта отчётов");
+      return;
+    }
     try {
-      const pageSize = 100;
-      const firstPage = await api.getTasks({ ...taskFilters, page: 1, limit: pageSize });
-      const allTasks = [...(firstPage.data ?? [])];
-      const totalPagesToLoad = firstPage.totalPages ?? 1;
-
-      for (let page = 2; page <= totalPagesToLoad; page += 1) {
-        const pageResult = await api.getTasks({ ...taskFilters, page, limit: pageSize });
-        allTasks.push(...(pageResult.data ?? []));
-      }
-
-      const header = [
-        "ID",
-        "Название",
-        "Описание",
-        "Тег",
-        "Статус",
-        "Приоритет",
-        "Сложность",
-        "Дедлайн",
-        "Команда",
-      ];
-
-      const rows = allTasks.map((task) => [
-        task.id,
-        task.name,
-        task.description,
-        task.tag,
-        task.status,
-        task.business_priority,
-        task.complexity,
-        task.deadline ? new Date(task.deadline).toISOString() : "",
-        task.assignedTeam?.name ?? "",
-      ]);
-
-      const csvContent = [header, ...rows].map((row) => row.map(toCsvValue).join(",")).join("\n");
-      const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = `tasks_export_${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(link.href);
+      await api.exportTasksCsv({
+        status: taskFilters.status,
+        tag: taskFilters.tag,
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось экспортировать задачи");
     }
   }
 
-  // ─── Optimization ──────────────────────────────────────────────────────────
   async function runOptimization() {
+    if (!userCanOptimize) {
+      setError("Недостаточно прав для запуска оптимизации");
+      return;
+    }
     setIsLoading(true);
     setError("");
     try {
       const result = await api.optimize();
       setOptimizationData(result.data || null);
-      setActiveTab("Оптимизация");
+      selectTab("Оптимизация");
       setSelectedOptimizationPoint("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось выполнить оптимизацию");
@@ -499,6 +534,10 @@ export default function TeamBalancerApp() {
   }
 
   async function applySelectedOptimization(point: string) {
+    if (!userCanOptimize) {
+      setError("Недостаточно прав для применения оптимизации");
+      return;
+    }
     try {
       setIsLoading(true);
       setError("");
@@ -512,13 +551,39 @@ export default function TeamBalancerApp() {
     }
   }
 
-  // ─── Derived data ──────────────────────────────────────────────────────────
-  // Client-side sort — ensures order is always visible regardless of backend
+  const myTeamLoad = useMemo(() => {
+    if (!currentUser?.teamId) return null;
+    const fromLoad = teamLoadData.find((t) => t.id === currentUser.teamId);
+    if (fromLoad) {
+      return {
+        name: fromLoad.name,
+        currentLoad: fromLoad.currentLoad,
+        capacity: fromLoad.capacity,
+        pct: Math.min(100, Number(fromLoad.loadPercentage)),
+      };
+    }
+    const team = teams.find((t) => t.id === currentUser.teamId);
+    if (!team) return null;
+    const pct = team.capacity ? Math.round((team.currentLoad / team.capacity) * 100) : 0;
+    return {
+      name: team.name,
+      currentLoad: team.currentLoad,
+      capacity: team.capacity,
+      pct: Math.min(100, pct),
+    };
+  }, [currentUser, teamLoadData, teams]);
+
   const projectFilteredTasks = useMemo(() => {
-    if (taskProjectFilter === "__all__") return tasks;
-    const pid = Number(taskProjectFilter);
-    return tasks.filter((t) => t.projectId === pid);
-  }, [tasks, taskProjectFilter]);
+    let list = tasks;
+    if (taskProjectFilter !== "__all__") {
+      const pid = Number(taskProjectFilter);
+      list = list.filter((t) => t.projectId === pid);
+    }
+    if (myTasksOnly && currentUser?.teamId) {
+      list = list.filter((t) => t.assignedTeamId === currentUser.teamId);
+    }
+    return list;
+  }, [tasks, taskProjectFilter, myTasksOnly, currentUser]);
 
   const sortedTasks = (() => {
     const key = taskFilters.sort_by;
@@ -546,10 +611,14 @@ export default function TeamBalancerApp() {
     );
   }, [sortedTasks]);
 
+  const optimizationVariants = useMemo(
+    () => filterOptimizationVariants(optimizationData?.paretoFront),
+    [optimizationData],
+  );
+
   const visibleTaskIds = new Set(sortedTasks.map((task) => task.id));
   const selectedVisibleCount = selectedTaskIds.filter((id) => visibleTaskIds.has(id)).length;
 
-  // Use real stats from API when available, fallback to local computation
   const overview = useMemo(() => {
     const total = taskStats?.total ?? tasks.length;
     const done =
@@ -576,36 +645,33 @@ export default function TeamBalancerApp() {
     }));
   }, [taskStats]);
 
-  // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-background text-foreground">
-      {/* ── Header ── */}
+      {}
       <header className="sticky top-0 z-30 border-b border-border-soft/70 bg-background/90 backdrop-blur">
         <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-4 px-4 py-4 md:px-8">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-accent-primary/45 shadow-sm">
-              <BarChart3 className="h-5 w-5" />
-            </div>
+
             <div>
               <p className="text-xs font-medium uppercase tracking-wide text-warm-muted">
                 TeamBalancer
               </p>
-              <h1 className="text-lg font-semibold md:text-xl">Управление задачами команды</h1>
             </div>
           </div>
           <div className="flex items-center gap-2">
             {currentUser && (
               <div className="mr-1 hidden rounded-xl border border-border-soft/70 bg-surface px-3 py-1.5 text-right md:block">
                 <p className="text-xs font-medium leading-4">{currentUser.username}</p>
-                <p className="text-[11px] leading-4 text-warm-muted">{currentUser.email}</p>
+                <p className="text-[11px] leading-4 text-warm-muted">
+                  {ROLE_LABELS[currentUser.role] ?? currentUser.role}
+                </p>
+                <p className="text-[10px] leading-4 text-warm-muted/80">{currentUser.email}</p>
               </div>
             )}
             <Button variant="outline" size="sm" onClick={reloadData} disabled={isLoading}>
               {isLoading ? "Загрузка…" : "Обновить"}
             </Button>
-            <Button variant="secondary" size="sm" onClick={runOptimization} disabled={isLoading}>
-              Оптимизировать
-            </Button>
+
             <Button variant="destructive" size="sm" onClick={handleLogout}>
               Выйти
             </Button>
@@ -618,11 +684,23 @@ export default function TeamBalancerApp() {
           <Card className="border-accent-danger/40 bg-accent-danger/20 p-3 text-sm">{error}</Card>
         ) : null}
 
-        {/* ══════════════════════════════════════════════════════
-            TAB: ОБЗОР
-        ══════════════════════════════════════════════════════ */}
-        {activeTab === "Обзор" && (
+        {
+
+}
+        {displayedTab === "Обзор" && (
           <section className="space-y-4">
+
+            {myTeamLoad ? (
+              <div className="rounded-2xl bg-surface p-5 ring-1 ring-border-soft/60">
+                <p className="text-sm font-semibold">Моя загрузка</p>
+                <p className="mt-1 text-xs text-warm-muted">
+                  Команда: {myTeamLoad.name} · {myTeamLoad.currentLoad} / {myTeamLoad.capacity} SP
+                </p>
+                <Progress className="mt-3 h-2" value={myTeamLoad.pct} />
+                <p className="mt-2 text-sm tabular-nums font-medium">{myTeamLoad.pct}%</p>
+              </div>
+            ) : null}
+
             <AnalyticsPanel
               dashboard={dashboardAnalytics}
               loadChart={loadChart}
@@ -632,156 +710,57 @@ export default function TeamBalancerApp() {
                   ? projects.find((p) => String(p.id) === taskProjectFilter)?.name
                   : undefined
               }
+              canAccessOptimization={userCanOptimize}
+              onNavigate={(tab) => {
+                if (tab === "Оптимизация" && !userCanOptimize) return;
+                selectTab(tab as AppTab);
+              }}
             />
 
-            {/* KPI cards */}
-            <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
-              {[
-                ["Всего задач", String(overview.total)],
-                ["Не распределено", String(overview.unassigned)],
-                ["В работе", String(overview.inProgress)],
-                ["Завершено", String(overview.done)],
-                ["Средняя загрузка", `${overview.avgLoad.toFixed(1)} SP`],
-                ["Средняя сложность", overview.avgComplexity],
-              ].map(([label, value]) => (
-                <Card key={label}>
-                  <CardHeader className="pb-2">
-                    <CardDescription>{label}</CardDescription>
-                    <CardTitle className="text-2xl">{value}</CardTitle>
-                  </CardHeader>
-                </Card>
-              ))}
-            </div>
-
-            {/* Progress + tags */}
-            <div className="grid gap-4 lg:grid-cols-3">
-              <Card className="lg:col-span-2">
-                <CardHeader>
-                  <CardTitle>Прогресс задач</CardTitle>
-                  <CardDescription>Выполнение текущего пула</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span className="text-warm-muted">Завершено</span>
-                      <span>{Math.round(overview.completion)}%</span>
-                    </div>
-                    <Progress value={overview.completion} />
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {statusOptions.map((status) => {
-                      const count = groupedByStatus[status].length;
-                      const percent = overview.total ? (count / overview.total) * 100 : 0;
-                      return (
-                        <div key={status} className="rounded-xl bg-background p-3">
-                          <div className="mb-1 flex items-center justify-between text-xs text-warm-muted">
-                            <span>{statusLabels[status]}</span>
-                            <span>{count}</span>
-                          </div>
-                          <Progress value={percent} />
-                        </div>
-                      );
-                    })}
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>По тегам</CardTitle>
-                  <CardDescription>Распределение задач</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {byTag.map((item) => {
-                    const percent = overview.total ? (item.value / overview.total) * 100 : 0;
-                    return (
-                      <div key={item.tag}>
-                        <div className="mb-1 flex justify-between text-xs text-warm-muted">
-                          <span>{item.tag}</span>
-                          <span>{item.value}</span>
-                        </div>
-                        <Progress value={percent} />
-                      </div>
-                    );
-                  })}
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* Team load from GET /teams/load */}
-            <Card>
-              <CardHeader>
-                <CardTitle>Загрузка команд</CardTitle>
-                <CardDescription>
-                  Данные из /teams/load — текущая загрузка и свободная ёмкость
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-                  {teamLoadData.map((team) => {
-                    const pct = Math.min(100, Number(team.loadPercentage));
-                    const isOver = pct >= 90;
-                    return (
-                      <div
-                        key={team.id}
-                        className={cn(
-                          "rounded-xl p-3",
-                          isOver ? "bg-accent-danger/20" : "bg-background",
-                        )}
-                      >
-                        <p className="truncate text-sm font-medium">{team.name}</p>
-                        <p className="text-xs text-warm-muted">
-                          {team.currentLoad}/{team.capacity} SP · свободно {team.available} SP
-                        </p>
-                        <Progress className="mt-2" value={pct} />
-                        <p className="mt-1 text-xs text-warm-muted">{pct.toFixed(1)}%</p>
-                      </div>
-                    );
-                  })}
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Upcoming deadlines from statistics */}
             {taskStats?.upcomingDeadlines && taskStats.upcomingDeadlines.length > 0 && (
-              <Card>
-                <CardHeader>
-                  <CardTitle>Ближайшие дедлайны</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-2">
-                    {taskStats.upcomingDeadlines.slice(0, 5).map((task) => (
-                      <div
-                        key={task.id}
-                        className="flex items-center justify-between rounded-xl bg-background px-3 py-2 text-sm"
-                      >
-                        <span className="font-medium">{task.name}</span>
-                        <span className="text-xs text-warm-muted">
-                          {new Date(task.deadline).toLocaleDateString("ru")}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
+              <div className="rounded-2xl bg-surface p-5 ring-1 ring-border-soft/60">
+                <p className="mb-3 font-semibold">Ближайшие дедлайны</p>
+                <div className="space-y-2">
+                  {taskStats.upcomingDeadlines.slice(0, 5).map((task) => (
+                    <div
+                      key={task.id}
+                      className="flex items-center justify-between rounded-xl bg-background px-3 py-2 text-sm"
+                    >
+                      <span className="font-medium">{task.name}</span>
+                      <span className="text-xs text-warm-muted">
+                        {new Date(task.deadline).toLocaleDateString("ru")}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </section>
         )}
 
-        {activeTab === "Проекты" && (
+        {displayedTab === "Проекты" && (
           <ProjectsPanel
             onError={setError}
             onTasksChanged={reloadData}
             statusLabels={statusLabels}
+            teams={teams}
+            canManageProjects={caps.canManageProjects}
+            canDeleteProjects={caps.canDeleteProjects}
+            canCreateTasksInProject={caps.canCreateTasks}
+            showFinancialInfo={userCanOptimize}
           />
         )}
 
-        {/* ══════════════════════════════════════════════════════
-            TAB: ЗАДАЧИ
-        ══════════════════════════════════════════════════════ */}
-        {activeTab === "Задачи" && (
+        {displayedTab === "Админ" && caps.canManageUsers && (
+          <UsersAdminPanel teams={teams} onError={setError} />
+        )}
+
+        {
+
+}
+        {displayedTab === "Задачи" && (
           <section className="space-y-3">
-            {/* ── Single compact toolbar ── */}
+            {}
             <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border-soft bg-surface px-4 py-3">
               <Select
                 value={taskProjectFilter}
@@ -803,7 +782,7 @@ export default function TeamBalancerApp() {
                 </SelectContent>
               </Select>
 
-              {/* Tag */}
+              {}
               <Select
                 value={taskFilters.tag ?? "__all__"}
                 onValueChange={(v) =>
@@ -821,11 +800,11 @@ export default function TeamBalancerApp() {
                 </SelectContent>
               </Select>
 
-              {/* Priority range */}
+              {}
               <div className="flex items-center gap-1">
                 <span className="text-xs text-warm-muted">P</span>
                 <Input
-                  type="number" min={1} max={10}
+                  type="number" min={1} max={3}
                   className="h-8 w-14 text-xs"
                   placeholder="от"
                   value={taskFilters.priority_min ?? ""}
@@ -839,7 +818,7 @@ export default function TeamBalancerApp() {
                 />
                 <span className="text-xs text-warm-muted">–</span>
                 <Input
-                  type="number" min={1} max={10}
+                  type="number" min={1} max={3}
                   className="h-8 w-14 text-xs"
                   placeholder="до"
                   value={taskFilters.priority_max ?? ""}
@@ -853,7 +832,6 @@ export default function TeamBalancerApp() {
                 />
               </div>
 
-              {/* Sort */}
               <Select
                 value={taskFilters.sort_by ?? "business_priority"}
                 onValueChange={(v) =>
@@ -896,10 +874,28 @@ export default function TeamBalancerApp() {
                 Сбросить
               </Button>
 
-              {/* Spacer */}
+              {currentUser?.teamId ? (
+                <Button
+                  variant={myTasksOnly ? "secondary" : "outline"}
+                  size="sm"
+                  className="h-8 text-xs"
+                  onClick={() => {
+                    setMyTasksOnly((v) => !v);
+                    setTaskFilters((p) => ({
+                      ...p,
+                      page: 1,
+                      assignedTeamId:
+                        !myTasksOnly && currentUser.teamId ? currentUser.teamId : undefined,
+                    }));
+                  }}
+                >
+                  {myTasksOnly ? "Все задачи" : "Мои задачи"}
+                </Button>
+              ) : null}
+
               <div className="flex-1" />
 
-              {/* View toggle */}
+              {}
               <Tabs
                 value={taskView}
                 onValueChange={(v) => {
@@ -916,16 +912,19 @@ export default function TeamBalancerApp() {
                 </TabsList>
               </Tabs>
 
-              {/* Add task button */}
-              <Button size="sm" className="h-8 text-xs" onClick={() => setShowAddTask(true)}>
-                + Задача
-              </Button>
-              <Button variant="outline" size="sm" className="h-8 text-xs" onClick={exportTasksCsv}>
-                Экспорт CSV
-              </Button>
+              {caps.canCreateTasks ? (
+                <Button size="sm" className="h-8 text-xs" onClick={() => setShowAddTask(true)}>
+                  + Задача
+                </Button>
+              ) : null}
+              {caps.canViewReports ? (
+                <Button variant="outline" size="sm" className="h-8 text-xs" onClick={exportTasksCsv}>
+                  Экспорт CSV
+                </Button>
+              ) : null}
             </div>
 
-            {taskView === "table" && (
+            {taskView === "table" && caps.canEditTasks && (
               <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border-soft bg-surface px-4 py-3">
                 <p className="text-xs text-warm-muted">Выбрано задач: {selectedVisibleCount}</p>
                 <Select
@@ -944,49 +943,57 @@ export default function TeamBalancerApp() {
                     ))}
                   </SelectContent>
                 </Select>
-                <Select value={bulkAssignedTeamId} onValueChange={setBulkAssignedTeamId}>
-                  <SelectTrigger className="h-8 w-52 text-xs">
-                    <SelectValue placeholder="Команда (не менять)" />
+                {caps.canAssignTeams ? (
+                  <Select value={bulkAssignedTeamId} onValueChange={setBulkAssignedTeamId}>
+                    <SelectTrigger className="h-8 w-52 text-xs">
+                      <SelectValue placeholder="Команда (не менять)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__keep__">Команда: не менять</SelectItem>
+                      <SelectItem value="__none__">Снять назначение</SelectItem>
+                      {teams.map((team) => (
+                        <SelectItem key={team.id} value={String(team.id)}>
+                          {team.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : null}
+                <Select value={bulkPriority || "__keep__"} onValueChange={(v) => setBulkPriority(v === "__keep__" ? "" : v)}>
+                  <SelectTrigger className="h-8 w-40 text-xs">
+                    <SelectValue placeholder="Приоритет (не менять)" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__keep__">Команда: не менять</SelectItem>
-                    <SelectItem value="__none__">Снять назначение</SelectItem>
-                    {teams.map((team) => (
-                      <SelectItem key={team.id} value={String(team.id)}>
-                        {team.name}
-                      </SelectItem>
-                    ))}
+                    <SelectItem value="__keep__">Приоритет: не менять</SelectItem>
+                    <SelectItem value="1">Низкий (1)</SelectItem>
+                    <SelectItem value="2">Средний (2)</SelectItem>
+                    <SelectItem value="3">Высокий (3)</SelectItem>
                   </SelectContent>
                 </Select>
-                <Input
-                  type="number"
-                  min={1}
-                  max={10}
-                  className="h-8 w-36 text-xs"
-                  placeholder="Приоритет 1-10"
-                  value={bulkPriority}
-                  onChange={(e) => setBulkPriority(e.target.value)}
-                />
                 <Button size="sm" className="h-8 text-xs" onClick={applyBulkUpdate}>
                   Применить к выбранным
                 </Button>
               </div>
             )}
 
-            {/* ── Kanban / Table ── */}
+            {}
             <Tabs value={taskView} onValueChange={(v) => setTaskView(v as "kanban" | "table")}>
               <TabsContent value="kanban">
                 <div className="grid gap-4 lg:grid-cols-5">
                   {statusOptions.map((status) => (
                     <Card
                       key={status}
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={async () => {
-                        if (dragTaskId) {
-                          await updateTaskStatus(dragTaskId, status);
-                          setDragTaskId(null);
-                        }
-                      }}
+                      onDragOver={readOnly ? undefined : (e) => e.preventDefault()}
+                      onDrop={
+                        readOnly
+                          ? undefined
+                          : async () => {
+                            if (dragTaskId) {
+                              await updateTaskStatus(dragTaskId, status);
+                              setDragTaskId(null);
+                            }
+                          }
+                      }
                     >
                       <CardHeader className="pb-2">
                         <div className="flex items-center justify-between">
@@ -998,10 +1005,13 @@ export default function TeamBalancerApp() {
                         {groupedByStatus[status].map((task) => (
                           <div
                             key={task.id}
-                            draggable
-                            onDragStart={() => setDragTaskId(task.id)}
+                            draggable={!readOnly}
+                            onDragStart={readOnly ? undefined : () => setDragTaskId(task.id)}
                             onClick={() => openTaskModal(task)}
-                            className="cursor-grab rounded-xl border border-border-soft bg-white p-3 shadow-sm active:cursor-grabbing"
+                            className={cn(
+                              "rounded-xl border border-border-soft bg-white p-3 shadow-sm",
+                              readOnly ? "cursor-pointer" : "cursor-grab active:cursor-grabbing",
+                            )}
                           >
                             <p className="text-sm font-medium">{task.name}</p>
                             <p className="mt-1 line-clamp-2 text-xs text-warm-muted">
@@ -1026,7 +1036,7 @@ export default function TeamBalancerApp() {
               </TabsContent>
 
               <TabsContent value="table">
-                {/* Status filter — only for table view */}
+                {}
                 <div className="mb-3 flex items-center gap-2">
                   <span className="text-xs text-warm-muted">Статус:</span>
                   <Select
@@ -1058,15 +1068,18 @@ export default function TeamBalancerApp() {
                       <Table>
                         <TableHeader className="bg-accent-primary/10">
                           <TableRow>
-                            <TableHead className="w-12">
-                              <input
-                                type="checkbox"
-                                checked={
-                                  sortedTasks.length > 0 && selectedVisibleCount === sortedTasks.length
-                                }
-                                onChange={(e) => toggleSelectAllVisibleTasks(e.target.checked)}
-                              />
-                            </TableHead>
+                            {caps.canEditTasks ? (
+                              <TableHead className="w-12">
+                                <input
+                                  type="checkbox"
+                                  checked={
+                                    sortedTasks.length > 0 &&
+                                    selectedVisibleCount === sortedTasks.length
+                                  }
+                                  onChange={(e) => toggleSelectAllVisibleTasks(e.target.checked)}
+                                />
+                              </TableHead>
+                            ) : null}
                             <TableHead>Задача</TableHead>
                             <TableHead>Тег</TableHead>
                             <TableHead>Статус</TableHead>
@@ -1080,13 +1093,15 @@ export default function TeamBalancerApp() {
                         <TableBody>
                           {sortedTasks.map((task) => (
                             <TableRow key={task.id}>
-                              <TableCell>
-                                <input
-                                  type="checkbox"
-                                  checked={selectedTaskIds.includes(task.id)}
-                                  onChange={(e) => toggleTaskSelection(task.id, e.target.checked)}
-                                />
-                              </TableCell>
+                              {caps.canEditTasks ? (
+                                <TableCell>
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedTaskIds.includes(task.id)}
+                                    onChange={(e) => toggleTaskSelection(task.id, e.target.checked)}
+                                  />
+                                </TableCell>
+                              ) : null}
                               <TableCell>
                                 <p className="font-medium">{task.name}</p>
                                 <p className="text-xs text-warm-muted">{task.description}</p>
@@ -1095,23 +1110,27 @@ export default function TeamBalancerApp() {
                                 <Badge variant="outline">{task.tag}</Badge>
                               </TableCell>
                               <TableCell>
-                                <Select
-                                  value={task.status}
-                                  onValueChange={(v) =>
-                                    updateTaskStatus(task.id, v as TaskStatus)
-                                  }
-                                >
-                                  <SelectTrigger className="w-[160px]">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {statusOptions.map((s) => (
-                                      <SelectItem key={s} value={s}>
-                                        {statusLabels[s]}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
+                                {readOnly ? (
+                                  <Badge variant="outline">{statusLabels[task.status]}</Badge>
+                                ) : (
+                                  <Select
+                                    value={task.status}
+                                    onValueChange={(v) =>
+                                      updateTaskStatus(task.id, v as TaskStatus)
+                                    }
+                                  >
+                                    <SelectTrigger className="w-[160px]">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {statusOptions.map((s) => (
+                                        <SelectItem key={s} value={s}>
+                                          {statusLabels[s]}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                )}
                               </TableCell>
                               <TableCell>{task.business_priority}</TableCell>
                               <TableCell>{task.complexity}</TableCell>
@@ -1129,15 +1148,17 @@ export default function TeamBalancerApp() {
                                   size="sm"
                                   onClick={() => openTaskModal(task)}
                                 >
-                                  Открыть
+                                  {readOnly ? "Просмотр" : "Открыть"}
                                 </Button>
-                                <Button
-                                  variant="destructive"
-                                  size="sm"
-                                  onClick={() => deleteTask(task.id)}
-                                >
-                                  Удалить
-                                </Button>
+                                {caps.canDeleteTasks ? (
+                                  <Button
+                                    variant="destructive"
+                                    size="sm"
+                                    onClick={() => deleteTask(task.id)}
+                                  >
+                                    Удалить
+                                  </Button>
+                                ) : null}
                               </TableCell>
                             </TableRow>
                           ))}
@@ -1149,7 +1170,7 @@ export default function TeamBalancerApp() {
               </TabsContent>
             </Tabs>
 
-            {/* ── Pagination ── */}
+            {}
             {totalPages > 1 && (
               <div className="flex items-center justify-center gap-2">
                 <Button
@@ -1176,12 +1197,12 @@ export default function TeamBalancerApp() {
           </section>
         )}
 
-        {/* ══════════════════════════════════════════════════════
-            TAB: КОМАНДЫ
-        ══════════════════════════════════════════════════════ */}
-        {activeTab === "Команды" && (
+        {
+
+}
+        {displayedTab === "Команды" && (
           <section className="space-y-3">
-            {/* ── Compact toolbar ── */}
+            {}
             <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border-soft bg-surface px-4 py-3">
               <Input
                 className="h-8 w-48 text-xs"
@@ -1212,12 +1233,14 @@ export default function TeamBalancerApp() {
                 Сбросить
               </Button>
               <div className="flex-1" />
-              <Button size="sm" className="h-8 text-xs" onClick={() => setShowAddTeam(true)}>
-                + Команда
-              </Button>
+              {caps.canManageTeams ? (
+                <Button size="sm" className="h-8 text-xs" onClick={() => setShowAddTeam(true)}>
+                  + Команда
+                </Button>
+              ) : null}
             </div>
 
-            {/* ── Team cards ── */}
+            {}
             <div className="grid gap-3 md:grid-cols-2">
               {teams.map((team) => {
                 const loadPercent = Math.min(
@@ -1245,16 +1268,24 @@ export default function TeamBalancerApp() {
                           </div>
                         </div>
                         <div className="flex gap-2">
-                          <Button variant="outline" size="sm" onClick={() => openTeamModal(team)}>
-                            Изменить
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            onClick={() => deleteTeam(team.id)}
-                          >
-                            Удалить
-                          </Button>
+                          {caps.canManageTeams ? (
+                            <>
+                              <Button variant="outline" size="sm" onClick={() => openTeamModal(team)}>
+                                Изменить
+                              </Button>
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                onClick={() => deleteTeam(team.id)}
+                              >
+                                Удалить
+                              </Button>
+                            </>
+                          ) : (
+                            <Button variant="outline" size="sm" onClick={() => openTeamModal(team)}>
+                              Задачи
+                            </Button>
+                          )}
                         </div>
                       </div>
                       <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-warm-muted">
@@ -1277,7 +1308,10 @@ export default function TeamBalancerApp() {
                       </div>
                       <Progress className="mt-3" value={loadPercent} />
                       <p className="mt-1 text-xs text-warm-muted">
-                        {loadPercent.toFixed(1)}% · {team.cost.toLocaleString("ru")} ₽/SP
+                        {loadPercent.toFixed(1)}%
+                        {userCanOptimize
+                          ? ` · ${team.cost.toLocaleString("ru")} ₽/SP`
+                          : null}
                       </p>
                     </CardContent>
                   </Card>
@@ -1287,118 +1321,223 @@ export default function TeamBalancerApp() {
           </section>
         )}
 
-        {/* ══════════════════════════════════════════════════════
-            TAB: ОПТИМИЗАЦИЯ
-        ══════════════════════════════════════════════════════ */}
-        {activeTab === "Оптимизация" && (
+        {
+
+}
+        {displayedTab === "Оптимизация" && userCanOptimize && (
           <section className="space-y-4">
-            <PreferencesPanel teams={teams} onError={setError} />
 
             {!optimizationData ? (
-              <Card>
-                <CardContent className="flex flex-col items-center gap-4 py-10 text-center">
-                  <Sparkles className="h-10 w-10 text-warm-muted" />
-                  <p className="text-warm-muted">
-                    Нажмите «Оптимизировать» в шапке, чтобы запустить алгоритм распределения.
-                  </p>
-                  <Button onClick={runOptimization} disabled={isLoading}>
-                    Запустить оптимизацию
-                  </Button>
-                </CardContent>
-              </Card>
+              <div className="rounded-2xl bg-surface p-10 ring-1 ring-border-soft/60 text-center">
+                <Sparkles className="mx-auto h-10 w-10 text-warm-muted" />
+                <p className="mt-4 text-warm-muted">
+                  Запустите алгоритм, чтобы получить варианты распределения задач по командам.
+                </p>
+                <Button className="mt-5" onClick={runOptimization} disabled={isLoading}>
+                  Запустить оптимизацию
+                </Button>
+              </div>
             ) : (
               <>
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Выберите одно из решений</CardTitle>
-                    <CardDescription>
-                      Доступно решений: {optimizationData.summary?.solutionsCount}. Выбор и применение
-                      выполняются вручную.
-                    </CardDescription>
-                  </CardHeader>
-                </Card>
+                {}
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-surface px-5 py-4 ring-1 ring-border-soft/60">
+                  <div>
+                    <p className="font-semibold">Варианты распределения</p>
+                    <p className="text-xs text-warm-muted">
+                      {optimizationVariants.length} варианта · кликните карточку для деталей
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={runOptimization} disabled={isLoading}>
+                    Пересчитать
+                  </Button>
+                </div>
 
-                <div className="grid gap-3 md:grid-cols-2">
-                  {optimizationData.paretoFront?.map((item) => (
-                    <Card key={item.point}>
-                      <CardHeader className="pb-2">
-                        <CardTitle className="text-base">
-                          {item.point}. {item.name}
-                        </CardTitle>
-                        <CardDescription>
-                          Стоимость: {item.metrics.totalCost} · Загрузка: {item.metrics.maxLoad}%
-                          {item.metrics.totalPreference != null
-                            ? ` · Предпочтение: ${item.metrics.totalPreference}`
-                            : ""}
-                          {item.weights
-                            ? ` · α=${item.weights.alpha} β=${item.weights.beta} γ=${item.weights.gamma}`
-                            : ""}
-                        </CardDescription>
-                        <div className="pt-2">
+                {}
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  {optimizationVariants.map((item) => {
+                    const applied = selectedOptimizationPoint === item.point;
+                    const loadNum = Number(item.metrics.maxLoad);
+                    const loadColor =
+                      loadNum >= 85 ? "#f87171" : loadNum >= 70 ? "#fbbf24" : "#34d399";
+                    return (
+                      <button
+                        key={item.point}
+                        type="button"
+                        onClick={() => setSelectedOptimizationPoint(
+                          selectedOptimizationPoint === item.point ? "" : item.point
+                        )}
+                        className={cn(
+                          "group w-full rounded-2xl bg-surface p-4 text-left ring-1 transition-all",
+                          "hover:ring-accent-primary/40 hover:shadow-lg active:scale-[0.98]",
+                          applied
+                            ? "ring-2 ring-accent-primary/60 bg-accent-primary/5"
+                            : "ring-border-soft/60",
+                        )}
+                      >
+                        {}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-accent-primary/20 text-sm font-bold text-accent-primary">
+                              {item.point}
+                            </span>
+                            <span className="text-sm font-semibold leading-tight">{item.name}</span>
+                          </div>
+                          {applied && (
+                            <span className="shrink-0 rounded-full bg-accent-primary/20 px-2 py-0.5 text-[10px] font-medium text-accent-primary">
+                              Применено
+                            </span>
+                          )}
+                        </div>
+
+                        {}
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                          <div className="rounded-lg bg-background px-1 py-2">
+                            <p className="text-xs font-bold tabular-nums">
+                              {Number(item.metrics.totalCost).toLocaleString("ru")}
+                            </p>
+                            <p className="text-[10px] text-warm-muted">₽ затраты</p>
+                          </div>
+                          <div className="rounded-lg bg-background px-1 py-2">
+                            <p className="text-xs font-bold tabular-nums" style={{ color: loadColor }}>
+                              {item.metrics.maxLoad}%
+                            </p>
+                            <p className="text-[10px] text-warm-muted">загрузка</p>
+                          </div>
+                          <div className="rounded-lg bg-background px-1 py-2">
+                            <p className="text-xs font-bold tabular-nums">
+                              {Number(item.metrics.totalPreference ?? 0).toFixed(1)}
+                            </p>
+                            <p className="text-[10px] text-warm-muted">Σ приор.</p>
+                          </div>
+                        </div>
+
+                        {}
+                        {item.weights && (
+                          <p className="mt-2 text-[10px] text-warm-muted">
+                            α={item.weights.alpha} β={item.weights.beta} γ={item.weights.gamma}
+                          </p>
+                        )}
+
+                        <p className="mt-2 text-[10px] text-warm-muted/50 group-hover:text-warm-muted transition-colors">
+                          Нажмите для деталей →
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {}
+                {(() => {
+                  const item = optimizationVariants.find(
+                    (i) => i.point === selectedOptimizationPoint,
+                  );
+                  if (!item) return null;
+                  return (
+                    <div className="rounded-2xl bg-surface ring-1 ring-accent-primary/40 overflow-hidden">
+                      {}
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-soft/60 px-5 py-4">
+                        <div>
+                          <p className="font-semibold">
+                            {item.point}. {item.name}
+                          </p>
+                          <p className="text-xs text-warm-muted">
+                            Стоимость {Number(item.metrics.totalCost).toLocaleString("ru")} ₽ ·
+                            Загрузка {item.metrics.maxLoad}% ·
+                            Сумма приоритетов {Number(item.metrics.totalPreference ?? 0).toFixed(0)}
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
                           <Button
                             size="sm"
-                            variant={selectedOptimizationPoint === item.point ? "secondary" : "default"}
                             onClick={() => applySelectedOptimization(item.point)}
                             disabled={isLoading}
                           >
-                            {selectedOptimizationPoint === item.point ? "Применено" : "Выбрать и применить"}
+                            {isLoading ? "Применение…" : "Применить"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setSelectedOptimizationPoint("")}
+                          >
+                            Закрыть
                           </Button>
                         </div>
-                      </CardHeader>
-                      {item.assignments && item.assignments.length > 0 && (
-                        <CardContent>
-                          <p className="mb-2 text-xs font-medium text-warm-muted uppercase tracking-wide">
-                            Назначения
-                          </p>
-                          <div className="space-y-1">
-                            {item.assignments.map((a, i) => (
-                              <div key={i} className="flex justify-between text-xs">
-                                <span>{a.taskName}</span>
-                                <span className="text-warm-muted">→ {a.teamName}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </CardContent>
-                      )}
-                      {item.teamLoads && item.teamLoads.length > 0 && (
-                        <CardContent className="pt-0">
-                          <p className="mb-2 text-xs font-medium text-warm-muted uppercase tracking-wide">
-                            Загрузка команд
-                          </p>
-                          <div className="space-y-2">
-                            {item.teamLoads.map((tl) => (
-                              <div key={tl.teamName}>
-                                <div className="mb-1 flex justify-between text-xs text-warm-muted">
-                                  <span>{tl.teamName}</span>
-                                  <span>
-                                    {tl.load}/{tl.capacity} SP · {tl.percentage}%
+                      </div>
+
+                      <div className="grid gap-6 p-5 md:grid-cols-2">
+                        {}
+                        {item.assignments && item.assignments.length > 0 && (
+                          <div>
+                            <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-warm-muted">
+                              Назначения задач
+                            </p>
+                            <div className="space-y-1.5">
+                              {item.assignments.map((a, i) => (
+                                <div
+                                  key={i}
+                                  className="flex items-center justify-between rounded-xl bg-background px-3 py-2 text-sm"
+                                >
+                                  <span className="truncate font-medium">{a.taskName}</span>
+                                  <span className="ml-2 shrink-0 text-xs text-warm-muted">
+                                    → {a.teamName}
                                   </span>
                                 </div>
-                                <Progress value={Math.min(100, Number(tl.percentage))} />
-                              </div>
-                            ))}
+                              ))}
+                            </div>
                           </div>
-                        </CardContent>
-                      )}
-                    </Card>
-                  ))}
-                </div>
+                        )}
+
+                        {}
+                        {item.teamLoads && item.teamLoads.length > 0 && (
+                          <div>
+                            <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-warm-muted">
+                              Загрузка команд
+                            </p>
+                            <div className="space-y-3">
+                              {item.teamLoads.map((tl) => {
+                                const pct = Math.min(100, Number(tl.percentage));
+                                const c =
+                                  pct >= 85 ? "#f87171" : pct >= 70 ? "#fbbf24" : "#34d399";
+                                return (
+                                  <div key={tl.teamName}>
+                                    <div className="mb-1 flex justify-between text-xs">
+                                      <span className="font-medium">{tl.teamName}</span>
+                                      <span className="font-semibold tabular-nums" style={{ color: c }}>
+                                        {tl.load}/{tl.capacity} SP · {pct}%
+                                      </span>
+                                    </div>
+                                    <div className="h-2 overflow-hidden rounded-full bg-background">
+                                      <div
+                                        className="h-full rounded-full transition-all duration-700"
+                                        style={{ width: `${pct}%`, background: c }}
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </>
             )}
           </section>
         )}
       </main>
 
-      {/* ── Bottom tab bar ── */}
+      {}
       <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-border-soft/70 bg-surface/95 px-2 py-2 backdrop-blur">
         <div className="mx-auto flex max-w-3xl justify-between gap-1">
-          {tabs.map((tab) => (
+          {visibleTabs.map((tab) => (
             <button
               key={tab}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => selectTab(tab)}
               className={cn(
                 "flex min-w-[56px] flex-1 flex-col items-center rounded-xl px-1 py-2 text-[10px] sm:text-xs",
-                activeTab === tab ? "bg-accent-primary/30 font-semibold" : "text-warm-muted",
+                displayedTab === tab ? "bg-accent-primary/30 font-semibold" : "text-warm-muted",
               )}
             >
               <span className="mb-0.5">{tabIcons[tab]}</span>
@@ -1408,7 +1547,7 @@ export default function TeamBalancerApp() {
         </div>
       </nav>
 
-      {/* ── Task modal ── */}
+      {}
       {selectedTask && taskDraft ? (
         <Dialog
           open
@@ -1421,11 +1560,15 @@ export default function TeamBalancerApp() {
         >
           <DialogContent className="max-h-[88vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>Карточка задачи #{selectedTask.id}</DialogTitle>
+              <DialogTitle>
+                {readOnly ? "Просмотр задачи" : "Карточка задачи"} #{selectedTask.id}
+              </DialogTitle>
               <DialogDescription>
-                {selectedTask.assignedTeam
-                  ? `Назначена: ${selectedTask.assignedTeam.name}`
-                  : "Команда не назначена"}
+                {readOnly
+                  ? "Режим только для просмотра"
+                  : selectedTask.assignedTeam
+                    ? `Назначена: ${selectedTask.assignedTeam.name}`
+                    : "Команда не назначена"}
               </DialogDescription>
             </DialogHeader>
             <form onSubmit={saveTaskDraft}>
@@ -1434,6 +1577,7 @@ export default function TeamBalancerApp() {
                   Название
                   <Input
                     className="mt-1"
+                    disabled={readOnly}
                     value={taskDraft.name ?? ""}
                     onChange={(e) => setTaskDraft((p) => ({ ...p, name: e.target.value }))}
                   />
@@ -1442,6 +1586,7 @@ export default function TeamBalancerApp() {
                   Описание
                   <Textarea
                     className="mt-1 min-h-[110px]"
+                    disabled={readOnly}
                     value={taskDraft.description ?? ""}
                     onChange={(e) => setTaskDraft((p) => ({ ...p, description: e.target.value }))}
                   />
@@ -1449,7 +1594,8 @@ export default function TeamBalancerApp() {
                 <label className="text-sm text-warm-muted">
                   Тег
                   <select
-                    className="mt-1 h-10 w-full rounded-xl border border-border-soft bg-white px-3 text-sm"
+                    className="mt-1 h-10 w-full rounded-xl border border-border-soft bg-white px-3 text-sm disabled:opacity-60"
+                    disabled={readOnly}
                     value={taskDraft.tag ?? "frontend"}
                     onChange={(e) =>
                       setTaskDraft((p) => ({ ...p, tag: e.target.value as TagType }))
@@ -1463,12 +1609,13 @@ export default function TeamBalancerApp() {
                 <label className="text-sm text-warm-muted">
                   Статус
                   <Select
+                    disabled={readOnly}
                     value={(taskDraft.status ?? "backlog") as string}
                     onValueChange={(v) =>
                       setTaskDraft((p) => ({ ...p, status: v as TaskStatus }))
                     }
                   >
-                    <SelectTrigger className="mt-1">
+                    <SelectTrigger className="mt-1" disabled={readOnly}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1481,8 +1628,9 @@ export default function TeamBalancerApp() {
                   </Select>
                 </label>
                 <label className="text-sm text-warm-muted">
-                  Команда
+                  Команда-исполнитель
                   <Select
+                    disabled={readOnly || !caps.canAssignTeams}
                     value={String(taskDraft.assignedTeamId ?? "__none__")}
                     onValueChange={(v) =>
                       setTaskDraft((p) => ({
@@ -1491,7 +1639,7 @@ export default function TeamBalancerApp() {
                       }))
                     }
                   >
-                    <SelectTrigger className="mt-1">
+                    <SelectTrigger className="mt-1" disabled={readOnly || !caps.canAssignTeams}>
                       <SelectValue placeholder="Не назначена" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1511,6 +1659,7 @@ export default function TeamBalancerApp() {
                     min={1}
                     max={10}
                     className="mt-1"
+                    disabled={readOnly}
                     value={taskDraft.complexity ?? 5}
                     onChange={(e) =>
                       setTaskDraft((p) => ({ ...p, complexity: Number(e.target.value) }))
@@ -1522,9 +1671,10 @@ export default function TeamBalancerApp() {
                   <Input
                     type="number"
                     min={1}
-                    max={10}
+                    max={3}
                     className="mt-1"
-                    value={taskDraft.business_priority ?? 5}
+                    disabled={readOnly}
+                    value={taskDraft.business_priority ?? 2}
                     onChange={(e) =>
                       setTaskDraft((p) => ({
                         ...p,
@@ -1538,33 +1688,48 @@ export default function TeamBalancerApp() {
                   <Input
                     type="datetime-local"
                     className="mt-1"
+                    disabled={readOnly}
                     value={String(taskDraft.deadline ?? "").slice(0, 16)}
                     onChange={(e) => setTaskDraft((p) => ({ ...p, deadline: e.target.value }))}
                   />
                 </label>
               </div>
               <div className="mt-5 flex justify-end gap-2">
-                <Button
-                  type="button"
-                  variant="destructive"
-                  onClick={() => selectedTask && deleteTask(selectedTask.id)}
-                >
-                  Удалить
-                </Button>
-                <Button type="submit">Сохранить</Button>
+                {readOnly ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setSelectedTask(null);
+                      setTaskDraft(null);
+                    }}
+                  >
+                    Закрыть
+                  </Button>
+                ) : null}
+                {caps.canDeleteTasks ? (
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    onClick={() => selectedTask && deleteTask(selectedTask.id)}
+                  >
+                    Удалить
+                  </Button>
+                ) : null}
+                {caps.canEditTasks ? <Button type="submit">Сохранить</Button> : null}
               </div>
             </form>
           </DialogContent>
         </Dialog>
       ) : null}
 
-      {/* ── Add task modal ── */}
+      {}
       <Dialog open={showAddTask} onOpenChange={setShowAddTask}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Новая задача</DialogTitle>
             <DialogDescription>
-              Задача создаётся в проекте (POST /projects/:id/tasks)
+              Задача будет добавлена в выбранный проект
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={createTask}>
@@ -1641,11 +1806,37 @@ export default function TeamBalancerApp() {
               <label className="text-sm text-warm-muted">
                 Приоритет (1–3)
                 <Input
-                  type="number" min={1} max={10} className="mt-1"
+                  type="number" min={1} max={3} className="mt-1"
                   value={taskForm.business_priority}
                   onChange={(e) => setTaskForm((p) => ({ ...p, business_priority: Number(e.target.value) }))}
                 />
               </label>
+              {caps.canAssignTeams ? (
+                <label className="text-sm text-warm-muted md:col-span-2">
+                  Команда-исполнитель
+                  <Select
+                    value={String(taskForm.assignedTeamId ?? "__none__")}
+                    onValueChange={(v) =>
+                      setTaskForm((p) => ({
+                        ...p,
+                        assignedTeamId: v === "__none__" ? null : Number(v),
+                      }))
+                    }
+                  >
+                    <SelectTrigger className="mt-1">
+                      <SelectValue placeholder="Не назначена" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Не назначена</SelectItem>
+                      {teams.map((t) => (
+                        <SelectItem key={t.id} value={String(t.id)}>
+                          {t.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </label>
+              ) : null}
               <label className="text-sm text-warm-muted md:col-span-2">
                 Дедлайн
                 <Input
@@ -1666,7 +1857,7 @@ export default function TeamBalancerApp() {
         </DialogContent>
       </Dialog>
 
-      {/* ── Add team modal ── */}
+      {}
       <Dialog open={showAddTeam} onOpenChange={setShowAddTeam}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -1695,26 +1886,30 @@ export default function TeamBalancerApp() {
                   {tagOptions.map((t) => <option key={t}>{t}</option>)}
                 </select>
               </label>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="text-sm text-warm-muted">
-                  Ёмкость (SP)
-                  <Input
-                    type="number" min={1} className="mt-1"
-                    placeholder="40"
-                    value={teamForm.capacity}
-                    onChange={(e) => setTeamForm((p) => ({ ...p, capacity: Number(e.target.value) }))}
-                  />
-                </label>
+              <label className="text-sm text-warm-muted">
+                Ёмкость (SP)
+                <Input
+                  type="number"
+                  min={1}
+                  className="mt-1"
+                  placeholder="40"
+                  value={teamForm.capacity}
+                  onChange={(e) => setTeamForm((p) => ({ ...p, capacity: Number(e.target.value) }))}
+                />
+              </label>
+              {userCanOptimize ? (
                 <label className="text-sm text-warm-muted">
                   Стоимость (₽/SP)
                   <Input
-                    type="number" min={1} className="mt-1"
+                    type="number"
+                    min={1}
+                    className="mt-1"
                     placeholder="2000"
                     value={teamForm.cost}
                     onChange={(e) => setTeamForm((p) => ({ ...p, cost: Number(e.target.value) }))}
                   />
                 </label>
-              </div>
+              ) : null}
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={() => setShowAddTeam(false)}>
@@ -1726,7 +1921,7 @@ export default function TeamBalancerApp() {
         </DialogContent>
       </Dialog>
 
-      {/* ── Team edit modal ── */}
+      {}
       {selectedTeam && teamDraft ? (
         <Dialog
           open
@@ -1749,15 +1944,17 @@ export default function TeamBalancerApp() {
                   Название
                   <Input
                     className="mt-1"
+                    disabled={!caps.canManageTeams}
                     value={teamDraft.name ?? ""}
                     onChange={(e) => setTeamDraft((p) => ({ ...p, name: e.target.value }))}
-                    required
+                    required={caps.canManageTeams}
                   />
                 </label>
                 <label className="text-sm text-warm-muted">
                   Специализация
                   <select
-                    className="mt-1 h-10 w-full rounded-xl border border-border-soft bg-white px-3 text-sm"
+                    className="mt-1 h-10 w-full rounded-xl border border-border-soft bg-white px-3 text-sm disabled:opacity-60"
+                    disabled={!caps.canManageTeams}
                     value={teamDraft.tag ?? "frontend"}
                     onChange={(e) =>
                       setTeamDraft((p) => ({ ...p, tag: e.target.value as TagType }))
@@ -1774,24 +1971,28 @@ export default function TeamBalancerApp() {
                     type="number"
                     min={1}
                     className="mt-1"
+                    disabled={!caps.canManageTeams}
                     value={teamDraft.capacity ?? 40}
                     onChange={(e) =>
                       setTeamDraft((p) => ({ ...p, capacity: Number(e.target.value) }))
                     }
                   />
                 </label>
-                <label className="text-sm text-warm-muted">
-                  Стоимость (₽/SP)
-                  <Input
-                    type="number"
-                    min={1}
-                    className="mt-1"
-                    value={teamDraft.cost ?? 2000}
-                    onChange={(e) =>
-                      setTeamDraft((p) => ({ ...p, cost: Number(e.target.value) }))
-                    }
-                  />
-                </label>
+                {userCanOptimize ? (
+                  <label className="text-sm text-warm-muted">
+                    Стоимость (₽/SP)
+                    <Input
+                      type="number"
+                      min={1}
+                      className="mt-1"
+                      disabled={!caps.canManageTeams}
+                      value={teamDraft.cost ?? 2000}
+                      onChange={(e) =>
+                        setTeamDraft((p) => ({ ...p, cost: Number(e.target.value) }))
+                      }
+                    />
+                  </label>
+                ) : null}
               </div>
               <div className="mt-4 rounded-xl border border-border-soft bg-surface p-3">
                 <p className="text-sm font-medium">Задачи команды</p>
@@ -1824,9 +2025,9 @@ export default function TeamBalancerApp() {
                     setTeamDraft(null);
                   }}
                 >
-                  Отмена
+                  {caps.canManageTeams ? "Отмена" : "Закрыть"}
                 </Button>
-                <Button type="submit">Сохранить</Button>
+                {caps.canManageTeams ? <Button type="submit">Сохранить</Button> : null}
               </div>
             </form>
           </DialogContent>

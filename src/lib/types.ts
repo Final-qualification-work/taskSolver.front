@@ -111,12 +111,31 @@ export interface ApiResponse<T> {
 
 export type UserRole = "admin" | "project_manager" | "team_lead" | "developer" | "viewer";
 
-export interface UserProfile {
+export interface UserPermissions {
+  canCreateTasks?: boolean;
+  canEditTasks?: boolean;
+  canDeleteTasks?: boolean;
+  canAssignTeams?: boolean;
+  canManageUsers?: boolean;
+  canViewReports?: boolean;
+  canOptimize?: boolean;
+  canManageProjects?: boolean;
+  canDeleteProjects?: boolean;
+  canManageTeams?: boolean;
+}
+
+export interface UserListItem {
   id: number;
   username: string;
   email: string;
   role: UserRole;
+  teamId: number | null;
+  isActive: boolean;
+  team?: { id: number; name: string; tag: TagType } | null;
+  permissions?: UserPermissions;
 }
+
+export interface UserProfile extends UserListItem {}
 
 export interface UserPreferences {
   id: number;

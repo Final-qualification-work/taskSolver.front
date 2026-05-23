@@ -8,6 +8,7 @@ import {
   TagType,
   TaskItem,
   TaskStatus,
+  Team,
 } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,13 @@ const projectStatusLabels: Record<ProjectStatus, string> = {
 };
 
 const tagOptions: TagType[] = ["frontend", "backend", "ML"];
+const statusOptions: TaskStatus[] = [
+  "not groomed",
+  "backlog",
+  "todo",
+  "in progress",
+  "done",
+];
 
 function toDateInputValue(iso?: string | null): string {
   if (!iso) return "";
@@ -48,9 +56,23 @@ type ProjectsPanelProps = {
   onError: (msg: string) => void;
   onTasksChanged: () => void;
   statusLabels: Record<TaskStatus, string>;
+  teams?: Team[];
+  canManageProjects?: boolean;
+  canDeleteProjects?: boolean;
+  canCreateTasksInProject?: boolean;
+  showFinancialInfo?: boolean;
 };
 
-export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: ProjectsPanelProps) {
+export function ProjectsPanel({
+  onError,
+  onTasksChanged,
+  statusLabels,
+  teams = [],
+  canManageProjects = false,
+  canDeleteProjects = false,
+  canCreateTasksInProject = true,
+  showFinancialInfo = false,
+}: ProjectsPanelProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<Project | null>(null);
@@ -58,6 +80,7 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
   const [showCreate, setShowCreate] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [showAddTask, setShowAddTask] = useState(false);
+  const [teamOptions, setTeamOptions] = useState<Team[]>(teams);
 
   const [projectForm, setProjectForm] = useState({
     name: "",
@@ -76,6 +99,7 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
     deadline: "",
     business_priority: 2,
     status: "backlog" as TaskStatus,
+    assignedTeamId: null as number | null,
   });
 
   async function loadProjects() {
@@ -106,6 +130,32 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
   useEffect(() => {
     loadProjects();
   }, []);
+
+  useEffect(() => {
+    setTeamOptions(teams);
+  }, [teams]);
+
+  useEffect(() => {
+    if (teamOptions.length > 0) return;
+    api
+      .getTeams()
+      .then((res) => setTeamOptions(res.data || []))
+      .catch(() => { });
+  }, [teamOptions.length]);
+
+  function openAddTaskModal() {
+    setTaskForm({
+      name: "",
+      description: "",
+      tag: "frontend",
+      complexity: 5,
+      deadline: "",
+      business_priority: 2,
+      status: "backlog",
+      assignedTeamId: null,
+    });
+    setShowAddTask(true);
+  }
 
   function openEditProject() {
     if (!detail) return;
@@ -174,6 +224,7 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
       await api.addTaskToProject(selectedId, {
         ...taskForm,
         deadline: taskForm.deadline || new Date().toISOString(),
+        assignedTeamId: taskForm.assignedTeamId ?? undefined,
       });
       setShowAddTask(false);
       setTaskForm({
@@ -184,6 +235,7 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
         deadline: "",
         business_priority: 2,
         status: "backlog",
+        assignedTeamId: null,
       });
       await loadDetail(selectedId);
       onTasksChanged();
@@ -214,15 +266,17 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-lg font-semibold">Проекты</h2>
-          <p className="text-sm text-warm-muted">Задачи создаются внутри проекта (POST /projects/:id/tasks)</p>
+          <p className="text-sm text-warm-muted">Задачи привязаны к выбранному проекту</p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={loadProjects} disabled={isLoading}>
             Обновить
           </Button>
-          <Button size="sm" onClick={() => setShowCreate(true)}>
-            Новый проект
-          </Button>
+          {canManageProjects ? (
+            <Button size="sm" onClick={() => setShowCreate(true)}>
+              Новый проект
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -277,19 +331,25 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
                       <CardDescription>{detail.description}</CardDescription>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" onClick={openEditProject}>
-                        Изменить
-                      </Button>
-                      <Button size="sm" onClick={() => setShowAddTask(true)}>
-                        Задача в проект
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => handleDeleteProject(detail.id)}
-                      >
-                        Удалить
-                      </Button>
+                      {canManageProjects ? (
+                        <Button size="sm" variant="outline" onClick={openEditProject}>
+                          Изменить
+                        </Button>
+                      ) : null}
+                      {canCreateTasksInProject ? (
+                        <Button size="sm" onClick={openAddTaskModal}>
+                          Задача в проект
+                        </Button>
+                      ) : null}
+                      {canDeleteProjects ? (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => handleDeleteProject(detail.id)}
+                        >
+                          Удалить
+                        </Button>
+                      ) : null}
                     </div>
                   </div>
                 </CardHeader>
@@ -316,7 +376,7 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">Задачи проекта</CardTitle>
-                  <CardDescription>GET /projects/{detail.id}/tasks</CardDescription>
+                  <CardDescription>Список задач проекта</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-2">
                   {tasks.length === 0 ? (
@@ -350,7 +410,7 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Новый проект</DialogTitle>
-            <DialogDescription>POST /api/projects</DialogDescription>
+            <DialogDescription>Укажите название, сроки и статус нового проекта</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleCreateProject} className="grid gap-3">
             <label className="text-sm text-warm-muted">
@@ -372,10 +432,12 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
                 </SelectContent>
               </Select>
             </label>
-            <label className="text-sm text-warm-muted">
-              Бюджет
-              <Input type="number" className="mt-1" value={projectForm.budget} onChange={(e) => setProjectForm((p) => ({ ...p, budget: e.target.value }))} />
-            </label>
+            {showFinancialInfo ? (
+              <label className="text-sm text-warm-muted">
+                Бюджет
+                <Input type="number" className="mt-1" value={projectForm.budget} onChange={(e) => setProjectForm((p) => ({ ...p, budget: e.target.value }))} />
+              </label>
+            ) : null}
             <label className="text-sm text-warm-muted">
               Дата начала
               <Input type="date" className="mt-1" value={projectForm.startDate} onChange={(e) => setProjectForm((p) => ({ ...p, startDate: e.target.value }))} />
@@ -396,7 +458,7 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Редактировать проект</DialogTitle>
-            <DialogDescription>PUT /api/projects/{detail?.id}</DialogDescription>
+            <DialogDescription>Изменение параметров проекта «{detail?.name}»</DialogDescription>
           </DialogHeader>
           <form onSubmit={handleUpdateProject} className="grid gap-3">
             <label className="text-sm text-warm-muted">
@@ -418,10 +480,12 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
                 </SelectContent>
               </Select>
             </label>
-            <label className="text-sm text-warm-muted">
-              Бюджет
-              <Input type="number" className="mt-1" value={projectForm.budget} onChange={(e) => setProjectForm((p) => ({ ...p, budget: e.target.value }))} />
-            </label>
+            {showFinancialInfo ? (
+              <label className="text-sm text-warm-muted">
+                Бюджет
+                <Input type="number" className="mt-1" value={projectForm.budget} onChange={(e) => setProjectForm((p) => ({ ...p, budget: e.target.value }))} />
+              </label>
+            ) : null}
             <label className="text-sm text-warm-muted">
               Дата начала
               <Input type="date" className="mt-1" value={projectForm.startDate} onChange={(e) => setProjectForm((p) => ({ ...p, startDate: e.target.value }))} />
@@ -439,36 +503,128 @@ export function ProjectsPanel({ onError, onTasksChanged, statusLabels }: Project
       </Dialog>
 
       <Dialog open={showAddTask} onOpenChange={setShowAddTask}>
-        <DialogContent>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Задача в «{detail?.name}»</DialogTitle>
-            <DialogDescription>POST /api/projects/{selectedId}/tasks</DialogDescription>
+            <DialogDescription>
+              Заполните параметры и при необходимости назначьте команду-исполнителя
+            </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleAddTask} className="grid gap-3 md:grid-cols-2">
             <label className="text-sm text-warm-muted md:col-span-2">
               Название
-              <Input className="mt-1" value={taskForm.name} onChange={(e) => setTaskForm((p) => ({ ...p, name: e.target.value }))} required />
+              <Input
+                className="mt-1"
+                placeholder="Название задачи"
+                value={taskForm.name}
+                onChange={(e) => setTaskForm((p) => ({ ...p, name: e.target.value }))}
+                required
+              />
             </label>
             <label className="text-sm text-warm-muted md:col-span-2">
               Описание
-              <Textarea className="mt-1" value={taskForm.description} onChange={(e) => setTaskForm((p) => ({ ...p, description: e.target.value }))} required />
+              <Textarea
+                className="mt-1 min-h-[80px]"
+                placeholder="Подробное описание"
+                value={taskForm.description}
+                onChange={(e) => setTaskForm((p) => ({ ...p, description: e.target.value }))}
+                required
+              />
             </label>
             <label className="text-sm text-warm-muted">
               Тег
-              <select className="mt-1 h-10 w-full rounded-xl border border-border-soft bg-white px-3 text-sm" value={taskForm.tag} onChange={(e) => setTaskForm((p) => ({ ...p, tag: e.target.value as TagType }))}>
-                {tagOptions.map((t) => <option key={t}>{t}</option>)}
+              <select
+                className="mt-1 h-10 w-full rounded-xl border border-border-soft bg-white px-3 text-sm"
+                value={taskForm.tag}
+                onChange={(e) => setTaskForm((p) => ({ ...p, tag: e.target.value as TagType }))}
+              >
+                {tagOptions.map((t) => (
+                  <option key={t}>{t}</option>
+                ))}
               </select>
             </label>
             <label className="text-sm text-warm-muted">
-              Приоритет (1–3)
-              <Input type="number" min={1} max={3} className="mt-1" value={taskForm.business_priority} onChange={(e) => setTaskForm((p) => ({ ...p, business_priority: Number(e.target.value) }))} />
+              Статус
+              <Select
+                value={taskForm.status}
+                onValueChange={(v) => setTaskForm((p) => ({ ...p, status: v as TaskStatus }))}
+              >
+                <SelectTrigger className="mt-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {statusOptions.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {statusLabels[s]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </label>
+            <label className="text-sm text-warm-muted">
+              Сложность (1–10)
+              <Input
+                type="number"
+                min={1}
+                max={10}
+                className="mt-1"
+                value={taskForm.complexity}
+                onChange={(e) => setTaskForm((p) => ({ ...p, complexity: Number(e.target.value) }))}
+              />
+            </label>
+            <label className="text-sm text-warm-muted">
+              Приоритет (1–3)
+              <Input
+                type="number"
+                min={1}
+                max={3}
+                className="mt-1"
+                value={taskForm.business_priority}
+                onChange={(e) =>
+                  setTaskForm((p) => ({ ...p, business_priority: Number(e.target.value) }))
+                }
+              />
+            </label>
+            {canCreateTasksInProject ? (
+              <label className="text-sm text-warm-muted md:col-span-2">
+                Команда-исполнитель
+                <Select
+                  value={String(taskForm.assignedTeamId ?? "__none__")}
+                  onValueChange={(v) =>
+                    setTaskForm((p) => ({
+                      ...p,
+                      assignedTeamId: v === "__none__" ? null : Number(v),
+                    }))
+                  }
+                >
+                  <SelectTrigger className="mt-1">
+                    <SelectValue placeholder="Не назначена" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Не назначена</SelectItem>
+                    {teamOptions.map((t) => (
+                      <SelectItem key={t.id} value={String(t.id)}>
+                        {t.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+            ) : null}
             <label className="text-sm text-warm-muted md:col-span-2">
               Дедлайн
-              <Input type="datetime-local" className="mt-1" value={taskForm.deadline} onChange={(e) => setTaskForm((p) => ({ ...p, deadline: e.target.value }))} required />
+              <Input
+                type="datetime-local"
+                className="mt-1"
+                value={taskForm.deadline}
+                onChange={(e) => setTaskForm((p) => ({ ...p, deadline: e.target.value }))}
+                required
+              />
             </label>
             <div className="flex justify-end gap-2 md:col-span-2">
-              <Button type="button" variant="outline" onClick={() => setShowAddTask(false)}>Отмена</Button>
+              <Button type="button" variant="outline" onClick={() => setShowAddTask(false)}>
+                Отмена
+              </Button>
               <Button type="submit">Добавить</Button>
             </div>
           </form>
